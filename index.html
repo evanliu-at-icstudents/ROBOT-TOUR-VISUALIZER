@@ -1,0 +1,493 @@
+import React, { useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Trash2, Copy, Undo2, MapPin, Square, Minus } from "lucide-react";
+
+const GRID_WIDTH = 4;
+const GRID_HEIGHT = 5;
+const CELL_SIZE = 90;
+const SNAP_STEP = 0.5;
+
+const initialBottles = [
+  { x: 1, y: 1.5 },
+  { x: 1, y: 3.5 },
+  { x: 2.5, y: 4 },
+];
+
+const initialZones = [
+  { col: 1, row: 5, label: "A" },
+  { col: 2, row: 1, label: "B" },
+  { col: 4, row: 3, label: "C" },
+  { col: 4, row: 1, label: "D" },
+];
+
+const initialWalls = [
+  { x1: 0, y1: 5, x2: 1, y2: 5 },
+  { x1: 1, y1: 4, x2: 2, y2: 4 },
+  { x1: 3, y1: 4, x2: 3, y2: 5 },
+  { x1: 3, y1: 4, x2: 4, y2: 4 },
+  { x1: 0, y1: 3, x2: 1, y2: 3 },
+  { x1: 3, y1: 2, x2: 3, y2: 3 },
+  { x1: 1, y1: 1, x2: 2, y2: 1 },
+  { x1: 2, y1: 0, x2: 2, y2: 1 },
+];
+
+function snapHalf(value) {
+  return Math.round(value / SNAP_STEP) * SNAP_STEP;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function fmtNumber(n) {
+  return Number.isInteger(n) ? String(n) : String(n).replace(/\.0$/, "");
+}
+
+function bottleKey(b) {
+  return `${b.x},${b.y}`;
+}
+
+function wallKey(w) {
+  const a = `${w.x1},${w.y1},${w.x2},${w.y2}`;
+  const b = `${w.x2},${w.y2},${w.x1},${w.y1}`;
+  return [a, b].sort()[0];
+}
+
+function wallEquals(a, b) {
+  return wallKey(a) === wallKey(b);
+}
+
+function zoneKey(z) {
+  return `${z.col},${z.row}`;
+}
+
+function exportPython(bottles, zones, walls) {
+  const bottleText = `BOTTLE_SPOTS = [\n${bottles
+    .map((b) => `    (${fmtNumber(b.x)}, ${fmtNumber(b.y)}),`)
+    .join("\n")}\n]`;
+
+  const zoneText = `ZONE_SPOTS = [\n${zones
+    .map((z) => `    (${z.col}, ${z.row}, ${JSON.stringify(z.label)}),`)
+    .join("\n")}\n]`;
+
+  const wallText = `WALL_SPOTS = [\n${walls
+    .map((w) => `    (${w.x1}, ${w.y1}, ${w.x2}, ${w.y2}),`)
+    .join("\n")}\n]`;
+
+  return `${bottleText}\n\n${zoneText}\n\n${wallText}`;
+}
+
+export default function FieldEditorWebsite() {
+  const [tool, setTool] = useState("bottle");
+  const [bottles, setBottles] = useState(initialBottles);
+  const [zones, setZones] = useState(initialZones);
+  const [walls, setWalls] = useState(initialWalls);
+  const [zoneLabel, setZoneLabel] = useState("A");
+  const [pendingWallPoint, setPendingWallPoint] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [copied, setCopied] = useState(false);
+
+  const widthPx = GRID_WIDTH * CELL_SIZE;
+  const heightPx = GRID_HEIGHT * CELL_SIZE;
+
+  const exportText = useMemo(() => exportPython(bottles, zones, walls), [bottles, zones, walls]);
+
+  function pushHistory() {
+    setHistory((prev) => [
+      ...prev,
+      {
+        bottles: JSON.parse(JSON.stringify(bottles)),
+        zones: JSON.parse(JSON.stringify(zones)),
+        walls: JSON.parse(JSON.stringify(walls)),
+      },
+    ]);
+  }
+
+  function undo() {
+    setHistory((prev) => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      setBottles(last.bottles);
+      setZones(last.zones);
+      setWalls(last.walls);
+      setPendingWallPoint(null);
+      return prev.slice(0, -1);
+    });
+  }
+
+  function resetAll() {
+    pushHistory();
+    setBottles([]);
+    setZones([]);
+    setWalls([]);
+    setPendingWallPoint(null);
+  }
+
+  async function copyExport() {
+    await navigator.clipboard.writeText(exportText);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  function svgToGrid(clientX, clientY, rect) {
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const x = clamp(px / CELL_SIZE, 0, GRID_WIDTH);
+    const y = clamp(GRID_HEIGHT - py / CELL_SIZE, 0, GRID_HEIGHT);
+    return { x, y };
+  }
+
+  function handleBottlePlace(point) {
+    const bottle = {
+      x: snapHalf(clamp(point.x, 0, GRID_WIDTH)),
+      y: snapHalf(clamp(point.y, 0, GRID_HEIGHT)),
+    };
+    if (bottles.some((b) => bottleKey(b) === bottleKey(bottle))) return;
+    pushHistory();
+    setBottles((prev) => [...prev, bottle]);
+  }
+
+  function handleZonePlace(point) {
+    const col = clamp(Math.floor(point.x) + 1, 1, GRID_WIDTH);
+    const row = clamp(Math.floor(point.y) + 1, 1, GRID_HEIGHT);
+    pushHistory();
+    setZones((prev) => {
+      const filtered = prev.filter((z) => zoneKey(z) !== `${col},${row}`);
+      return [...filtered, { col, row, label: zoneLabel || "Z" }];
+    });
+  }
+
+  function handleWallPlace(point) {
+    const snapped = {
+      x: Math.round(clamp(point.x, 0, GRID_WIDTH)),
+      y: Math.round(clamp(point.y, 0, GRID_HEIGHT)),
+    };
+
+    if (!pendingWallPoint) {
+      setPendingWallPoint(snapped);
+      return;
+    }
+
+    const dx = Math.abs(snapped.x - pendingWallPoint.x);
+    const dy = Math.abs(snapped.y - pendingWallPoint.y);
+    const isAdjacent = dx + dy === 1;
+
+    if (!isAdjacent) {
+      setPendingWallPoint(snapped);
+      return;
+    }
+
+    const wall = {
+      x1: pendingWallPoint.x,
+      y1: pendingWallPoint.y,
+      x2: snapped.x,
+      y2: snapped.y,
+    };
+
+    if (walls.some((w) => wallEquals(w, wall))) {
+      setPendingWallPoint(null);
+      return;
+    }
+
+    pushHistory();
+    setWalls((prev) => [...prev, wall]);
+    setPendingWallPoint(null);
+  }
+
+  function handleErase(point) {
+    const bottleHitRadius = 0.2;
+    const bottleMatch = bottles.find(
+      (b) => Math.hypot(b.x - point.x, b.y - point.y) <= bottleHitRadius
+    );
+    if (bottleMatch) {
+      pushHistory();
+      setBottles((prev) => prev.filter((b) => bottleKey(b) !== bottleKey(bottleMatch)));
+      return;
+    }
+
+    const col = clamp(Math.floor(point.x) + 1, 1, GRID_WIDTH);
+    const row = clamp(Math.floor(point.y) + 1, 1, GRID_HEIGHT);
+    const zoneMatch = zones.find((z) => z.col === col && z.row === row);
+    if (zoneMatch) {
+      pushHistory();
+      setZones((prev) => prev.filter((z) => zoneKey(z) !== zoneKey(zoneMatch)));
+      return;
+    }
+
+    const snapped = {
+      x: Math.round(clamp(point.x, 0, GRID_WIDTH)),
+      y: Math.round(clamp(point.y, 0, GRID_HEIGHT)),
+    };
+
+    const wallMatch = walls.find((w) => {
+      const midX = (w.x1 + w.x2) / 2;
+      const midY = (w.y1 + w.y2) / 2;
+      return Math.hypot(midX - snapped.x, midY - snapped.y) < 0.8;
+    });
+
+    if (wallMatch) {
+      pushHistory();
+      setWalls((prev) => prev.filter((w) => !wallEquals(w, wallMatch)));
+    }
+  }
+
+  function handleBoardClick(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const point = svgToGrid(e.clientX, e.clientY, rect);
+
+    if (tool === "bottle") handleBottlePlace(point);
+    if (tool === "zone") handleZonePlace(point);
+    if (tool === "wall") handleWallPlace(point);
+    if (tool === "erase") handleErase(point);
+  }
+
+  const toolButtons = [
+    { id: "bottle", label: "Bottle", icon: MapPin },
+    { id: "zone", label: "Zone", icon: Square },
+    { id: "wall", label: "Wall", icon: Minus },
+    { id: "erase", label: "Erase", icon: Trash2 },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6">
+      <div className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader>
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <CardTitle className="text-2xl">Field Element Editor</CardTitle>
+                <p className="mt-1 text-sm text-slate-600">
+                  Click to place bottles, zones, and walls. Then copy the generated Python lists.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {toolButtons.map(({ id, label, icon: Icon }) => (
+                  <Button
+                    key={id}
+                    variant={tool === id ? "default" : "outline"}
+                    className="rounded-2xl"
+                    onClick={() => {
+                      setTool(id);
+                      if (id !== "wall") setPendingWallPoint(null);
+                    }}
+                  >
+                    <Icon className="mr-2 h-4 w-4" />
+                    {label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <Badge variant="secondary">Tool: {tool}</Badge>
+              {tool === "zone" && (
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="zoneLabel">Zone label</Label>
+                  <Input
+                    id="zoneLabel"
+                    value={zoneLabel}
+                    onChange={(e) => setZoneLabel(e.target.value.slice(0, 6))}
+                    className="w-24 rounded-xl"
+                  />
+                </div>
+              )}
+              {tool === "wall" && (
+                <Badge variant="outline">
+                  {pendingWallPoint
+                    ? `Wall start: (${pendingWallPoint.x}, ${pendingWallPoint.y})`
+                    : "Click first grid intersection"}
+                </Badge>
+              )}
+            </div>
+
+            <div className="overflow-auto rounded-2xl border bg-white p-3">
+              <svg
+                width={widthPx}
+                height={heightPx}
+                viewBox={`0 0 ${widthPx} ${heightPx}`}
+                className="cursor-crosshair select-none"
+                onClick={handleBoardClick}
+              >
+                {zones.map((z) => {
+                  const x = (z.col - 1) * CELL_SIZE;
+                  const y = heightPx - z.row * CELL_SIZE;
+                  return (
+                    <g key={zoneKey(z)}>
+                      <rect
+                        x={x}
+                        y={y}
+                        width={CELL_SIZE}
+                        height={CELL_SIZE}
+                        fill="rgba(59,130,246,0.12)"
+                        stroke="rgba(59,130,246,0.6)"
+                        strokeWidth="2"
+                        rx="10"
+                      />
+                      <text
+                        x={x + CELL_SIZE / 2}
+                        y={y + CELL_SIZE / 2}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fontSize="26"
+                        fontWeight="700"
+                        fill="#1e293b"
+                      >
+                        {z.label}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {Array.from({ length: GRID_WIDTH + 1 }).map((_, i) => (
+                  <line
+                    key={`v-${i}`}
+                    x1={i * CELL_SIZE}
+                    y1={0}
+                    x2={i * CELL_SIZE}
+                    y2={heightPx}
+                    stroke="#94a3b8"
+                    strokeWidth="1"
+                  />
+                ))}
+                {Array.from({ length: GRID_HEIGHT + 1 }).map((_, i) => (
+                  <line
+                    key={`h-${i}`}
+                    x1={0}
+                    y1={i * CELL_SIZE}
+                    x2={widthPx}
+                    y2={i * CELL_SIZE}
+                    stroke="#94a3b8"
+                    strokeWidth="1"
+                  />
+                ))}
+
+                {walls.map((w, i) => (
+                  <line
+                    key={`${wallKey(w)}-${i}`}
+                    x1={w.x1 * CELL_SIZE}
+                    y1={heightPx - w.y1 * CELL_SIZE}
+                    x2={w.x2 * CELL_SIZE}
+                    y2={heightPx - w.y2 * CELL_SIZE}
+                    stroke="#0f172a"
+                    strokeWidth="8"
+                    strokeLinecap="round"
+                  />
+                ))}
+
+                {bottles.map((b, i) => (
+                  <g key={`${bottleKey(b)}-${i}`}>
+                    <circle
+                      cx={b.x * CELL_SIZE}
+                      cy={heightPx - b.y * CELL_SIZE}
+                      r="8"
+                      fill="#111827"
+                    />
+                    <text
+                      x={b.x * CELL_SIZE + 12}
+                      y={heightPx - b.y * CELL_SIZE - 10}
+                      fontSize="14"
+                      fill="#111827"
+                    >
+                      B{i}
+                    </text>
+                  </g>
+                ))}
+
+                {Array.from({ length: GRID_WIDTH * 2 + 1 }).map((_, ix) =>
+                  Array.from({ length: GRID_HEIGHT * 2 + 1 }).map((_, iy) => {
+                    const gx = ix * 0.5 * CELL_SIZE;
+                    const gy = heightPx - iy * 0.5 * CELL_SIZE;
+                    return (
+                      <circle
+                        key={`snap-${ix}-${iy}`}
+                        cx={gx}
+                        cy={gy}
+                        r="2"
+                        fill="#cbd5e1"
+                      />
+                    );
+                  })
+                )}
+
+                {Array.from({ length: GRID_WIDTH + 1 }).map((_, ix) =>
+                  Array.from({ length: GRID_HEIGHT + 1 }).map((_, iy) => (
+                    <circle
+                      key={`int-${ix}-${iy}`}
+                      cx={ix * CELL_SIZE}
+                      cy={heightPx - iy * CELL_SIZE}
+                      r="4"
+                      fill="#64748b"
+                    />
+                  ))
+                )}
+
+                {pendingWallPoint && (
+                  <circle
+                    cx={pendingWallPoint.x * CELL_SIZE}
+                    cy={heightPx - pendingWallPoint.y * CELL_SIZE}
+                    r="8"
+                    fill="#f59e0b"
+                  />
+                )}
+              </svg>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button variant="outline" className="rounded-2xl" onClick={undo} disabled={!history.length}>
+                <Undo2 className="mr-2 h-4 w-4" />
+                Undo
+              </Button>
+              <Button variant="outline" className="rounded-2xl" onClick={resetAll}>
+                <Trash2 className="mr-2 h-4 w-4" />
+                Clear all
+              </Button>
+              <Button className="rounded-2xl" onClick={copyExport}>
+                <Copy className="mr-2 h-4 w-4" />
+                {copied ? "Copied" : "Copy export"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-xl">Generated output</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Tabs defaultValue="export" className="w-full">
+              <TabsList className="grid w-full grid-cols-2 rounded-xl">
+                <TabsTrigger value="export">Python lists</TabsTrigger>
+                <TabsTrigger value="counts">Summary</TabsTrigger>
+              </TabsList>
+              <TabsContent value="export" className="mt-4">
+                <Textarea
+                  value={exportText}
+                  readOnly
+                  className="min-h-[520px] rounded-2xl font-mono text-sm"
+                />
+              </TabsContent>
+              <TabsContent value="counts" className="mt-4 space-y-3 text-sm text-slate-700">
+                <div className="rounded-2xl border p-4">Bottles: {bottles.length}</div>
+                <div className="rounded-2xl border p-4">Zones: {zones.length}</div>
+                <div className="rounded-2xl border p-4">Walls: {walls.length}</div>
+                <div className="rounded-2xl border p-4">
+                  Bottle coordinates use 0.5-cell snapping. Walls use full grid intersections only.
+                </div>
+                <div className="rounded-2xl border p-4">
+                  Zone placement replaces any existing zone in the clicked cell.
+                </div>
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
