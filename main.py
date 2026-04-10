@@ -18,9 +18,9 @@ ROBOT_SAMPLE_SPACING = 25.0
 MIN_ROBOT_SAMPLES = 2
 BOTTLE_RADIUS = 3.0
 
-FORWARD = "FORWARD" #NOTE: ROBOT CAN NOT IMMEDIATELY TURN AT THE BEGINNING OF A SUBGRAPH MAKE SURE YOU MOVE AT LEAST ONE TILE BEFORE TURNING
+FORWARD = "FORWARD"   # NOTE: ROBOT CAN NOT IMMEDIATELY TURN AT THE BEGINNING OF A SUBGRAPH
 REVERSE = "REVERSE"
-DO_180 = "DO_180" #NOTE: 180's CAN CAUSE DRIFTING
+DO_180 = "DO_180"     # NOTE: 180's CAN CAUSE DRIFTING
 START = "START"
 STOP = "STOP"
 
@@ -32,38 +32,16 @@ MISSION_MARKER_COLOR = "yellow"
 
 # MAIN THING TO EDIT
 MISSION_PROTOCOL = [
-    (0, 2.5),
+    (0, 0),
     START,
-    (0, 2.5),
-    (2.5, 2.5),
-    (2.5, 4.5),
-    (0.5, 4.5),
+    (0, 0),
+    (1, 0),
+    (1, 1),
     REVERSE,
-    (2.5, 4.5),
-    (2.5, 2.5),
-    FORWARD,
-    (2.5, 3.5),
-    (0.5, 3.5),
-    DO_180,
-    (3.5, 3.5),
-    (3.5, 0.5),
-    REVERSE,
-    (3.5, 1.5),
-    (2.5, 1.5),
-    (2.5, 2.5),
-    FORWARD,
-    (2.5, 1.5),
-    (0.5, 1.5),
-    (0.5, 0.5),
-    (1.5, 0.5),
-    REVERSE,
-    (0.5, 0.5),
-    (0.5, 1.5),
-    (3.5, 1.5),
-    (3.5, 3.5),
+    (1, 0),
+    (0, 0),
     STOP
 ]
-
 BOTTLE_SPOTS = [
     (1, 1.5),
     (1, 3.5),
@@ -288,13 +266,14 @@ def generate_dense_path(points, spacing, blend_radius):
     return dedupe_points(dense)
 
 # ============================================================
-# PARSING - DO NOT EDIT
+# PARSING - MODIFIED SO NEXT PATH STARTS AT PREVIOUS ENDPOINT
 # ============================================================
 
 def parse_mixed_segments(items, initial_mode=FORWARD):
     segments = []
     current_mode = initial_mode
     current_points = []
+    last_point = None
 
     for item in items:
         if item == FORWARD or item == REVERSE:
@@ -304,9 +283,14 @@ def parse_mixed_segments(items, initial_mode=FORWARD):
                     "mode": current_mode,
                     "points": current_points[:]
                 })
+                last_point = current_points[-1]
+            elif len(current_points) == 1:
+                last_point = current_points[-1]
+
             current_mode = item
-            if current_points:
-                current_points = [current_points[-1]]
+
+            if last_point is not None:
+                current_points = [last_point]
             else:
                 current_points = []
 
@@ -317,16 +301,19 @@ def parse_mixed_segments(items, initial_mode=FORWARD):
                     "mode": current_mode,
                     "points": current_points[:]
                 })
+                last_point = current_points[-1]
+            elif len(current_points) == 1:
+                last_point = current_points[-1]
 
-            if len(current_points) >= 1:
+            if last_point is not None:
                 segments.append({
                     "kind": "turn",
                     "mode": current_mode,
-                    "point": current_points[-1]
+                    "point": last_point
                 })
-
-            if current_points:
-                current_points = [current_points[-1]]
+                current_points = [last_point]
+            else:
+                current_points = []
 
         elif item == START:
             if len(current_points) >= 2:
@@ -335,12 +322,15 @@ def parse_mixed_segments(items, initial_mode=FORWARD):
                     "mode": current_mode,
                     "points": current_points[:]
                 })
+                last_point = current_points[-1]
+            elif len(current_points) == 1:
+                last_point = current_points[-1]
 
-            if len(current_points) >= 1:
+            if last_point is not None:
                 segments.append({
                     "kind": "start",
                     "mode": current_mode,
-                    "point": current_points[-1],
+                    "point": last_point,
                     "label": "Mission begin"
                 })
 
@@ -353,12 +343,15 @@ def parse_mixed_segments(items, initial_mode=FORWARD):
                     "mode": current_mode,
                     "points": current_points[:]
                 })
+                last_point = current_points[-1]
+            elif len(current_points) == 1:
+                last_point = current_points[-1]
 
-            if len(current_points) >= 1:
+            if last_point is not None:
                 segments.append({
                     "kind": "stop",
                     "mode": current_mode,
-                    "point": current_points[-1],
+                    "point": last_point,
                     "label": "Mission complete"
                 })
 
@@ -366,6 +359,7 @@ def parse_mixed_segments(items, initial_mode=FORWARD):
 
         else:
             current_points.append(item)
+            last_point = item
 
     if len(current_points) >= 2:
         segments.append({
@@ -912,7 +906,69 @@ def draw_segment(ax, sim_result, cell_size, show_labels=True):
         ax.set_title(f"Segment {sim_result['segment_index'] + 1}: {label}")
 
 # ============================================================
-# MAIN - DO NOT EDIT
+# C++ EXPORT
+# ============================================================
+
+def sanitize_cpp_float(v):
+    return f"{v:.1f}f"
+
+def mode_to_cpp(mode):
+    if mode == FORWARD:
+        return "TRAVEL_FORWARD"
+    elif mode == REVERSE:
+        return "TRAVEL_REVERSE"
+    else:
+        raise ValueError(f"Unsupported mode for C++ export: {mode}")
+
+def export_mission_as_cpp(mission_protocol, cell_size):
+    segments = parse_mixed_segments(mission_protocol, initial_mode=FORWARD)
+    path_segments = [seg for seg in segments if seg["kind"] == "path" and len(seg["points"]) >= 2]
+
+    if not path_segments:
+        raise ValueError("No path segments found to export.")
+
+    cm_path_segments = []
+    for seg in path_segments:
+        pts_cm = to_cm(seg["points"], cell_size)
+        cm_path_segments.append({
+            "mode": seg["mode"],
+            "points": pts_cm
+        })
+
+    origin_x, origin_y = cm_path_segments[0]["points"][0]
+
+    cpp_lines = []
+    max_waypoints = 0
+
+    for i, seg in enumerate(cm_path_segments, start=1):
+        relative_points = [
+            (x - origin_x, y - origin_y)
+            for x, y in seg["points"]
+        ]
+
+        max_waypoints = max(max_waypoints, len(relative_points))
+
+        cpp_lines.append(f"static const PPPoint waypoints{i}[] PROGMEM = {{")
+        for x, y in relative_points:
+            cpp_lines.append(f"  {{ {sanitize_cpp_float(x):>6}, {sanitize_cpp_float(y):>6} }},")
+        cpp_lines.append("};")
+        cpp_lines.append("")
+
+    cpp_lines.append("static const PathDef paths[] = {")
+    for i, seg in enumerate(cm_path_segments, start=1):
+        mode_cpp = mode_to_cpp(seg["mode"])
+        cpp_lines.append(
+            f"  {{ waypoints{i}, (int)(sizeof(waypoints{i}) / sizeof(waypoints{i}[0])), {mode_cpp} }},"
+        )
+    cpp_lines.append("};")
+    cpp_lines.append("")
+    cpp_lines.append("const int NUM_PATHS = (int)(sizeof(paths) / sizeof(paths[0]));")
+    cpp_lines.append(f"const int MAX_WAYPOINTS = {max_waypoints};")
+
+    return "\n".join(cpp_lines)
+
+# ============================================================
+# MAIN
 # ============================================================
 
 segments = parse_mixed_segments(MISSION_PROTOCOL, initial_mode=FORWARD)
@@ -959,4 +1015,8 @@ fig.text(
 )
 
 plt.tight_layout(rect=[0, 0.05, 1, 1])
+
+print("\n// COPY/PASTE INTO ROBOT CODE\n")
+print(export_mission_as_cpp(MISSION_PROTOCOL, CELL_SIZE))
+
 plt.show()
